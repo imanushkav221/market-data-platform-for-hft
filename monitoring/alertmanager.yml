@@ -1,0 +1,56 @@
+# Routing, grouping and silencing. Prometheus decides *what* is wrong;
+# Alertmanager decides *who hears about it and how often*, which is a separate
+# problem and the one that determines whether alerts keep getting read.
+#
+# The grouping here is deliberate: by source and alert name, so a vendor having a
+# bad morning produces one notification with five symbols in it rather than five
+# notifications. Alert fatigue is the actual failure mode of monitoring.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: [alertname, source]
+  group_wait: 30s        # let a burst settle before the first message
+  group_interval: 5m     # new members of an existing group
+  repeat_interval: 4h    # nagging, for things nobody has acknowledged
+  routes:
+    - matchers: [severity = "page"]
+      receiver: oncall
+      group_wait: 10s
+      repeat_interval: 1h
+    - matchers: [severity = "warn"]
+      receiver: morning-summary
+      group_wait: 5m
+      repeat_interval: 12h
+
+inhibit_rules:
+  # If the exporter is down, every data alert derived from it is noise. Say the
+  # true thing once instead of the consequences ten times.
+  - source_matchers: [alertname = "MdpExporterDown"]
+    target_matchers: [team = "data-platform"]
+    equal: [platform]
+
+  # A blocked load explains the staleness it caused.
+  - source_matchers: [alertname = "MdpChecksFailing"]
+    target_matchers: [alertname = "MdpEodFileLate"]
+    equal: [source]
+
+receivers:
+  # Webhooks, because every destination a desk actually uses takes one, and the
+  # choice between them is a config change rather than a code change.
+  - name: default
+    webhook_configs:
+      - url: http://host.docker.internal:9199/alerts
+        send_resolved: true
+
+  - name: oncall
+    webhook_configs:
+      - url: http://host.docker.internal:9199/alerts/page
+        send_resolved: true
+
+  - name: morning-summary
+    webhook_configs:
+      - url: http://host.docker.internal:9199/alerts/warn
+        send_resolved: true

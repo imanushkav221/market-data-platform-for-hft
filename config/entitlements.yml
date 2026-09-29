@@ -1,0 +1,41 @@
+# Who may read what.
+#
+# Exchange data usually arrives with a licence that says which people, which
+# purposes and sometimes which physical sites may use it. "Everyone internal"
+# is a licence breach waiting to be discovered by an auditor, and the platform
+# is the only place the rule can actually be enforced.
+#
+# Enforced in the serving layer, because that is the one door every consumer
+# goes through, and logged either way so the question "who read this?" has an
+# answer.
+
+default_consumer: research        # what an unspecified caller counts as
+
+datasets:
+  mcx_bhavcopy:
+    licence: "MCX published end-of-day, internal use"
+    allow: [research, trading, risk, platform]
+  binance_trades:
+    licence: "public market data, free tier"
+    allow: [research, trading, risk, platform]
+  # An example of the case that matters: a licensed intraday product that only
+  # the desks paying for it may read.
+  mcx_intraday:
+    licence: "MCX intraday, per-seat licence"
+    allow: [trading, platform]
+    note: "research access needs a seat; ask before widening this"
+  # The platform's own operational record: the catalogue, the check history, the
+  # vendor scorecard and the access log itself. This is a dataset, not plumbing.
+  # The access log says who read the licensed feed and when, which is precisely
+  # the sort of thing that should not be readable by whoever asks for it, and
+  # the catalogue is a list of what is worth asking for.
+  platform_metadata:
+    licence: "internal, operational"
+    allow: [research, trading, risk, platform]
+
+consumers:
+  research:  {description: "quant researchers and backtests"}
+  trading:   {description: "live trading systems"}
+  risk:      {description: "risk and control"}
+  platform:  {description: "the pipeline itself"}
+  external:  {description: "anything outside the firm", allow_nothing: true}

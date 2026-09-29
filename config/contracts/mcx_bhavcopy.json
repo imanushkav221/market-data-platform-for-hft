@@ -1,0 +1,34 @@
+{
+  "dataset": "mcx_bhavcopy",
+  "schema_version": "1.0",
+  "description": "MCX end-of-day bhavcopy: one row per contract per trading day. The medium-frequency path: small, scheduled, and complete or not published. There is no external total to reconcile against, so completeness is judged from the file itself and the trading calendar, by the expected_coverage check.",
+  "grain": ["exchange", "symbol", "expiry", "trade_date"],
+  "event_time_column": "trade_date",
+  "columns": [
+    {"name": "exchange", "type": "string", "required": true, "allowed": ["MCX"]},
+    {"name": "symbol", "type": "string", "required": true},
+    {"name": "expiry", "type": "date", "required": true},
+    {"name": "trade_date", "type": "date", "required": true},
+    {"name": "open", "type": "float", "required": true, "min": 0},
+    {"name": "high", "type": "float", "required": true, "min": 0},
+    {"name": "low", "type": "float", "required": true, "min": 0},
+    {"name": "close", "type": "float", "required": true, "min": 0},
+    {"name": "settle", "type": "float", "required": false, "min": 0},
+    {"name": "volume", "type": "float", "required": true, "min": 0},
+    {"name": "open_interest", "type": "float", "required": false, "min": 0}
+  ],
+  "rules": {
+    "unique_on": ["exchange", "symbol", "expiry", "trade_date"],
+    "cross_field": [
+      {"name": "high_is_highest", "expr": "(high >= open) & (high >= close) & (high >= low)"},
+      {"name": "low_is_lowest", "expr": "(low <= open) & (low <= close)"},
+      {"name": "expiry_not_before_trade_date", "expr": "expiry >= trade_date"}
+    ],
+    "max_null_fraction": 0.0
+  },
+  "lineage": {
+    "source_system": "mcx_daily_bhavcopy",
+    "owner": "market-data-platform",
+    "licence": "exchange published end-of-day file; intraday and tick data are licensed separately and are not used here"
+  }
+}

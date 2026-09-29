@@ -1,0 +1,20 @@
+data/landing/
+data/quarantine/
+data/runs/
+data/*.duckdb
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+
+# Dagster writes its instance home and run storage here.
+.dagster/
+bench/data/
+
+# Rendered by scripts/monitoring_local.py. Generated, never edited:
+# monitoring/ is the source of truth for all of it.
+.local/
+
+# Retired artefacts kept locally, not part of the project.
+_to_delete/

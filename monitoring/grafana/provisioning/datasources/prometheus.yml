@@ -1,0 +1,13 @@
+# Provisioned, not clicked. A dashboard somebody configured by hand in the UI is
+# a dashboard that exists on exactly one machine.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: mdp-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s

@@ -1,0 +1,34 @@
+# What we measure vendors on, and what counts as good.
+#
+# This is the procurement half of the job: a vendor conversation goes better
+# with numbers than with impressions, and the numbers have to have been being
+# collected before the conversation was needed.
+#
+# This file used to open with a `golden_sources:` block ranking sources per
+# field with trust weights, for the case where two vendors disagree about a
+# settlement price. Nothing read it. It has been removed rather than left to
+# look implemented, because arbitration between sources needs something this
+# schema does not have - a `source` column on the fact tables, so a row can say
+# where it came from - and pretending otherwise in config is worse than an
+# honest gap. The gap is named in docs/ARCHITECTURE.md with the condition that
+# would close it: a second vendor for a dataset that already has one.
+
+vendor_quality:
+  # Scored daily per source. A vendor conversation goes better with numbers.
+  dimensions:
+    freshness:
+      weight: 0.4
+      # what 'fresh' means for this source: an end-of-day file has a day, a tick feed has two minutes
+      target_seconds: {mcx_bhavcopy: 86400, binance_trades: 120}
+    completeness:
+      weight: 0.4
+      # Scored as the fraction of expected rows that actually arrived. There is
+      # no target key here because the target is 1.0 by definition: every row
+      # the contract said to expect. A key that always holds the same value is a
+      # knob nobody turns.
+    accuracy:
+      weight: 0.2
+      # Fraction of rows passing the contract and its cross-field rules.
+  thresholds:
+    green: 0.95
+    amber: 0.85   # below amber, the source is flagged in the daily report

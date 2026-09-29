@@ -1,0 +1,168 @@
+# Unit tests for the alert rules in ../rules/, run by `promtool test rules`.
+#
+# A rule that parses is not a rule that works. promtool check only proves the
+# YAML and the PromQL are well formed; it says nothing about whether the
+# expression fires when the thing it describes happens, or stays quiet when it
+# does not. Both bugs this file pins down — a weekend gate that made a Friday
+# outage unpageable, and a min() that let one arriving symbol mask a partial
+# file — were syntactically perfect.
+#
+# The scenarios below are written in the units the exporter emits:
+#   mdp_data_age_seconds{dataset,symbol}          now - newest event
+#   mdp_delivery_deadline_seconds{calendar,...}   deadline - now  (negative: past)
+#
+# MCX publishes at 23:55 Asia/Kolkata, which is 18:25 UTC. eod_bars carries a
+# trade_date, so a bar for day D has an event time of D at 00:00 UTC. Every
+# number here follows from those two facts.
+
+rule_files:
+  # Kept out of rules/ on purpose: prometheus.yml globs rules/*.yml and would
+  # try to load a test file as a rule file, which fails at startup.
+  - ../rules/mdp.yml
+
+evaluation_interval: 1m
+
+tests:
+  # -------------------------------------------------------------------------
+  # Saturday morning. Friday's file never arrived.
+  #
+  # This is the case the old expression could not report: its `mdp_trading_day
+  # == 1` gate is 0 all weekend, so the earliest it could have paged was Monday
+  # night, after the desk had already traded on Thursday's numbers.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: Friday file missing, and it is now Saturday
+    input_series:
+      # Newest bar is Thursday; it is now Saturday 00:30 UTC. 2d 0h 30m.
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="CRUDEOIL"}'
+        values: "174600+60x40"
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="GOLD"}'
+        values: "174600+60x40"
+      # Friday's 18:25 UTC deadline is 6h05m in the past and receding.
+      - series: 'mdp_delivery_deadline_seconds{calendar="mcx",trading_day="2026-09-25"}'
+        values: "-21900-60x40"
+      - series: 'mdp_trading_day{calendar="mcx"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MdpEodFileLate
+        exp_alerts: []          # still inside `for: 10m`
+      - eval_time: 20m
+        alertname: MdpEodFileLate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: data-platform
+              calendar: mcx
+              trading_day: "2026-09-25"
+            exp_annotations:
+              summary: "MCX end-of-day file for 2026-09-25 has not arrived"
+              description: "The newest end-of-day bar held is 1d 18h 25m 0s behind the delivery deadline for 2026-09-25, which has itself already passed. Nothing downstream should publish until this lands or is explicitly waived."
+              runbook: "docs/ARCHITECTURE.md#when-a-file-does-not-arrive"
+
+  # -------------------------------------------------------------------------
+  # Same Saturday morning, but Friday's file did arrive.
+  #
+  # Note the raw age here is 88200s, which is over the 86400 the old rule
+  # compared against. The only thing keeping that version quiet on a weekend was
+  # the calendar gate. The rewritten expression subtracts the deadline offset
+  # first, so the number it tests is 66300 and the weekend is a non-event.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: Friday file present, and it is now Saturday
+    input_series:
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="CRUDEOIL"}'
+        values: "88200+60x40"
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="GOLD"}'
+        values: "88200+60x40"
+      - series: 'mdp_delivery_deadline_seconds{calendar="mcx",trading_day="2026-09-25"}'
+        values: "-21900-60x40"
+      - series: 'mdp_trading_day{calendar="mcx"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MdpEodFileLate
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------
+  # Partial delivery: CRUDEOIL is in the file, GOLD is not.
+  #
+  # This is the min()/max() bug. min() takes the freshest symbol, so the one
+  # contract that did arrive suppressed the alert for every contract that did
+  # not — and a partial file is the failure mode this rule exists for.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: Partial file, one symbol arrived
+    input_series:
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="CRUDEOIL"}'
+        values: "88200+60x40"      # arrived
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="GOLD"}'
+        values: "174600+60x40"     # did not
+      - series: 'mdp_delivery_deadline_seconds{calendar="mcx",trading_day="2026-09-25"}'
+        values: "-21900-60x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MdpEodFileLate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: data-platform
+              calendar: mcx
+              trading_day: "2026-09-25"
+            exp_annotations:
+              summary: "MCX end-of-day file for 2026-09-25 has not arrived"
+              description: "The newest end-of-day bar held is 1d 18h 25m 0s behind the delivery deadline for 2026-09-25, which has itself already passed. Nothing downstream should publish until this lands or is explicitly waived."
+              runbook: "docs/ARCHITECTURE.md#when-a-file-does-not-arrive"
+
+  # -------------------------------------------------------------------------
+  # The deadline has not passed yet. Data a day old is not late, it is not due.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: Before the deadline
+    input_series:
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="CRUDEOIL"}'
+        values: "174600+60x40"
+      - series: 'mdp_delivery_deadline_seconds{calendar="mcx",trading_day="2026-09-25"}'
+        values: "3600-60x40"       # an hour still to go
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MdpEodFileLate
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------
+  # Inside the 30 minute grace window the calendar allows. Late, not missing.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: Inside the grace period
+    input_series:
+      - series: 'mdp_data_age_seconds{dataset="eod_bars",symbol="CRUDEOIL"}'
+        values: "174600+60x20"
+      - series: 'mdp_delivery_deadline_seconds{calendar="mcx",trading_day="2026-09-25"}'
+        values: "-600-60x20"       # 10 minutes past, grace is 30
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MdpEodFileLate
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------
+  # The other delivery rule, kept honest alongside it.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: Tick cursor stops advancing
+    input_series:
+      - series: 'mdp_cursor_idle_seconds{source="binance_trades"}'
+        values: "300+60x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MdpTickFeedStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: MdpTickFeedStalled
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              team: data-platform
+              source: binance_trades
+            exp_annotations:
+              summary: "binance_trades cursor has not advanced"
+              description: "binance_trades is 30m 0s behind. The poller is either dead or being served nothing."

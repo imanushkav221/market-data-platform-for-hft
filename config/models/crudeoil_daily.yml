@@ -1,0 +1,80 @@
+# A model recipe: inputs, features, target, validation and outputs, declared.
+#
+# The point of writing it this way rather than in code: a run records exactly
+# which recipe version produced it, so two runs months apart are comparable and
+# "what changed?" has an answer that is not archaeology. Adding a variant is a
+# block of YAML, not a branch in a script.
+
+recipe:
+  name: crudeoil_daily_return
+  version: "1.2"
+  owner: market-data-platform
+  description: >
+    Next-day return on MCX crude oil, from the back-adjusted continuous series.
+    Built to demonstrate how a model is run and validated on this platform, not
+    to claim a tradable signal.
+
+input:
+  dataset: mcx_bhavcopy
+  symbol: CRUDEOIL
+  exchange: MCX
+  # How the futures series is stitched. Ratio adjustment because returns must be
+  # continuous across a roll; anything else puts a fake jump in the target.
+  adjust: ratio
+  roll_method: volume
+  # as_of: 2026-06-30      # uncomment to reproduce a run as it stood that day
+
+target:
+  kind: forward_return
+  horizon_days: 1
+
+features:
+  - ret_1
+  - ret_5
+  - vol_20
+  - mom_10
+  - dist_ma50
+  - rsi_14
+
+estimator:
+  kind: ridge
+  alpha: 1.0
+
+validation:
+  scheme: walk_forward        # expanding window; never a random split
+  min_train: 250              # about a year before the first prediction
+  test_size: 21               # roughly a month per fold
+  baseline: no_change         # what the model has to beat to have said anything
+
+# Scenarios run in isolation from each other: own parameters, own artifacts, own
+# run id, compared side by side at the end. This is how you answer "is the longer
+# horizon better?" without overwriting the run that asked the first question.
+scenarios:
+  - name: baseline
+    description: the recipe as declared above
+
+  - name: longer_horizon
+    description: predict five days ahead instead of one
+    overrides:
+      target: {horizon_days: 5}
+
+  - name: more_features
+    description: add longer-horizon momentum and a volatility regime signal
+    overrides:
+      features: [ret_1, ret_5, ret_20, vol_20, vol_60, mom_10, mom_60,
+                 dist_ma50, dist_ma200, rsi_14, vol_ratio]
+
+  - name: price_only
+    description: strip it back to returns, as a control
+    overrides:
+      features: [ret_1, ret_5, ret_20]
+
+  - name: stronger_penalty
+    description: heavier ridge penalty, to see how much of the fit is noise
+    overrides:
+      estimator: {alpha: 25.0}
+
+  - name: shorter_history
+    description: half the training window, to show the effect of sample size
+    overrides:
+      validation: {min_train: 125}

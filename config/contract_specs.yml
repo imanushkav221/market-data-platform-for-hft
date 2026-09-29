@@ -1,0 +1,29 @@
+# Contract specifications, versioned by the date they took effect.
+#
+# Why this is a table and not a constant: specs change. When a lot size changes,
+# every P&L and every backtest that spans the change is wrong by a constant
+# factor unless the multiplier is looked up per date. Constant-factor errors are
+# the hardest kind to notice, because the shape of the curve still looks right.
+#
+# known_from / known_to make this point-in-time, exactly like the roll map.
+
+MCX:
+  CRUDEOIL:
+    - {lot_size: 100, tick_size: 1.0, price_unit: INR per barrel,
+       quantity_unit: barrels, known_from: 2020-01-01, known_to: 2999-12-31}
+    # Illustrative historical change, so the point-in-time lookup has something
+    # to find. Replace with the real spec history before using this for anything.
+    - {lot_size: 50, tick_size: 1.0, price_unit: INR per barrel,
+       quantity_unit: barrels, known_from: 2015-01-01, known_to: 2019-12-31}
+  NATURALGAS:
+    - {lot_size: 1250, tick_size: 0.1, price_unit: INR per mmBtu,
+       quantity_unit: mmBtu, known_from: 2020-01-01, known_to: 2999-12-31}
+  GOLD:
+    - {lot_size: 100, tick_size: 1.0, price_unit: INR per 10 grams,
+       quantity_unit: grams, known_from: 2020-01-01, known_to: 2999-12-31}
+  SILVER:
+    - {lot_size: 30, tick_size: 1.0, price_unit: INR per kg,
+       quantity_unit: kg, known_from: 2020-01-01, known_to: 2999-12-31}
+  COPPER:
+    - {lot_size: 2500, tick_size: 0.05, price_unit: INR per kg,
+       quantity_unit: kg, known_from: 2020-01-01, known_to: 2999-12-31}

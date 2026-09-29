@@ -1,0 +1,49 @@
+# Adding a new high-frequency source is this file. No Python change.
+name: binance_trades
+dataset: binance_trades
+contract: config/contracts/binance_trades.json
+frequency: continuous
+acquire:
+  driver: binance_agg_trades          # src/mdp/acquire.py registry key
+  base_url: https://data-api.binance.vision
+  symbols: [BTCUSDT, ETHUSDT]
+  window_minutes: 60
+  max_rows_per_request: 1000
+  retry: {attempts: 5, backoff_seconds: 1.5}
+  drop_driver: file_drop
+  drop:
+    dir: data/incoming/binance_trades
+    pattern: "*.parquet"
+    settle_seconds: 1
+    latency_sla_seconds: 30
+  monitor:
+    # A venue that trades continuously has no delivery deadline: staleness is
+    # caught by the freshness check instead.
+    enabled: false
+  # A continuous venue is polled, not waited for. Every minute is a deliberate
+  # choice: often enough that a missed run costs one minute of data, rare enough
+  # to stay far inside the public rate limit. Streaming over websocket is the
+  # next step and changes only this file plus one driver.
+  schedule:
+    kind: interval
+    every_seconds: 60
+  incremental:
+    enabled: true
+    time_column: ts
+    id_column: trade_id
+    first_run_minutes: 60      # how much history to take on a cold start
+    overlap_seconds: 5         # re-read a little; the grain deduplicates
+landing:
+  format: parquet
+  partition_by: [dataset, symbol, date]
+load:
+  table: trades
+  # Batched because the store pays a fixed cost per write that does not shrink
+  # with the row count: QuestDB commits a WAL transaction and then waits for the
+  # apply job. 50,000 rows is one such cost instead of 50,000 of them. It is per
+  # source because the tick path and a once-a-day file want different sizes.
+  batch_rows: 50000
+quality:
+  checks: [contract, uniqueness, monotonic_trade_id, gap_scan, freshness]
+  freshness_sla_seconds: 120
+  expect_rows_min: 1

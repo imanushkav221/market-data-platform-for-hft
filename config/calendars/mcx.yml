@@ -1,0 +1,36 @@
+# Trading calendar. Without one, every weekend and every holiday looks like a
+# vendor failure, and the alert that matters gets lost in the ones that do not.
+#
+# In production this comes from the exchange circular feed and is reviewed each
+# year. Hard-coding it in config is honest for a demo and easy to replace.
+name: MCX
+timezone: Asia/Kolkata
+trading_days: [mon, tue, wed, thu, fri]
+
+# The evening session means the file is published late. Anything not delivered by
+# the deadline is a missed delivery, not a slow one.
+session:
+  open: "09:00"
+  close: "23:30"
+publication:
+  # When the end-of-day file should exist, local time, on a trading day.
+  deadline: "23:55"
+  # How long after the deadline before we call it missing rather than late.
+  grace_minutes: 30
+
+holidays_2026:
+  - {date: 2026-01-26, name: Republic Day}
+  - {date: 2026-03-04, name: Holi}
+  - {date: 2026-03-21, name: Id-ul-Fitr}
+  - {date: 2026-04-01, name: Annual bank closing}
+  - {date: 2026-04-03, name: Good Friday}
+  - {date: 2026-04-14, name: Ambedkar Jayanti}
+  - {date: 2026-05-01, name: Maharashtra Day}
+  - {date: 2026-05-27, name: Bakri Id}
+  - {date: 2026-08-15, name: Independence Day}
+  - {date: 2026-09-14, name: Ganesh Chaturthi}
+  - {date: 2026-10-02, name: Gandhi Jayanti}
+  - {date: 2026-10-20, name: Dussehra}
+  - {date: 2026-11-09, name: Diwali Laxmi Pujan}
+  - {date: 2026-11-24, name: Guru Nanak Jayanti}
+  - {date: 2026-12-25, name: Christmas}

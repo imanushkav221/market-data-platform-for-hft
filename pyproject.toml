@@ -1,0 +1,135 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mdp"
+version = "0.1.0"
+description = "A market data platform, from exchange file to quant desk."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+# Runtime dependencies. These used to live in requirements.txt; that file is now
+# a generated export of this list (see `make lock`), kept only so the README's
+# `pip install -r requirements.txt` line still works for someone without uv.
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "duckdb>=0.10",
+    "pyyaml>=6.0",
+    # `requests` is also the entire QuestDB client. QuestDBStore talks to /exec
+    # and /imp over HTTP, which is the whole of what this platform needs from
+    # it, so there is no questdb driver in this list. That is a deliberate
+    # absence: a driver would add a pin to maintain and a second failure mode to
+    # learn, and it would not make the ASOF JOIN any faster. The one place it
+    # would help is streaming ingest over line protocol, and that is not a path
+    # this platform has.
+    "requests>=2.31",
+    # No orchestrator here on purpose, and this absence is the whole of the
+    # portability claim. Prefect used to be in this list, which made a runner
+    # load-bearing for anybody who only wanted to import `mdp.serve`, and quietly
+    # contradicted the claim that the pipeline is orchestrator-agnostic. Dagster is
+    # the orchestrator and lives in its own optional group; see
+    # `[dependency-groups]` below. `tests/test_audit_fixes.py` asserts both halves:
+    # no module under src/mdp imports an orchestrator, and none is importable in the
+    # environment `uv sync --frozen` produces.
+    # Windows and slim Linux images have no system tz database.
+    "tzdata>=2024.1",
+    # Figures for the deck and for the notebook.
+    "matplotlib>=3.8",
+]
+
+[project.scripts]
+mdp = "mdp.cli:main"
+
+[project.urls]
+Repository = "https://github.com/example/mdp"
+
+# Everything needed to develop, test and render the research surface. The
+# notebook stack is here rather than in [project.dependencies] because a
+# consumer importing mdp.serve does not need JupyterLab, but CI does.
+[dependency-groups]
+# Dagster is the one orchestrator, and it is still not in `dev`. `uv sync` installs
+# `dev` by default, so a scheduler in it would make the orchestrator load-bearing
+# for anybody who only wanted to run the tests - the exact coupling this platform
+# claims not to have. Its own group keeps the claim true by construction:
+# `uv sync --frozen` produces an environment in which `import dagster` fails, and a
+# test asserts that.
+#
+# Install it into an environment of its own rather than the project venv: it brings
+# a large tree (grpc, sqlalchemy, starlette) and putting it in `.venv` re-resolves
+# the lockfile for everybody who only wanted to run the tests.
+#
+#     uv venv .venv-dagster && uv pip install --python .venv-dagster \
+#       dagster dagster-webserver -r requirements.txt
+#     PYTHONPATH=$PWD/src .venv-dagster/bin/dagster dev -f flows/definitions.py
+#
+# `make dagster` does that for you. 1.12 is the floor because `exclusions` on
+# TimeWindowPartitionsDefinition - the keyword that makes the partition set the
+# trading calendar - landed there.
+dagster = ["dagster>=1.12", "dagster-webserver>=1.12"]
+
+dev = [
+    "jupyterlab>=4.0",
+    "nbconvert>=7.10",
+    "ipykernel>=6.29",
+    "matplotlib-inline>=0.1.6",
+    "pytest>=7.4",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+# ---------------------------------------------------------------------------
+# Packaging layout
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/mdp"]
+
+# ---------------------------------------------------------------------------
+# Tooling. Single source of truth: there is no setup.cfg, no ruff.toml, no
+# pytest.ini. One file to read and one file to review.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+# 100 rather than 88. The code was written to sit a little under 100 and the
+# comments carry the reasoning, which is the part worth reading; rewrapping
+# seventy-odd lines of prose to satisfy a default improves nothing. The nine
+# lines that were genuinely past 100 were wrapped rather than exempted.
+line-length = 100
+target-version = "py312"
+src = ["src"]
+# `make dagster-install` builds a virtualenv inside the repo. Its site-packages
+# are third-party source, so linting them reports other people's style as this
+# project's errors -- and it did, the first time the venv existed on a machine
+# that also ran `make lint`.
+extend-exclude = [".venv-dagster", ".venv", ".dagster"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# A notebook has to put `src` on sys.path before it can import the package, so
+# its imports genuinely cannot come first. This is the one place E402 describes
+# the format rather than the code.
+"notebooks/*.ipynb" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/mdp"]
+# Deliberately not strict. This is a real codebase with pandas and untyped
+# third-party clients in it; a config nobody can make pass is a config that gets
+# deleted from CI the first time it is inconvenient. This one passes today, and
+# tightening it is a separate, reviewable change.
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# src on the path, which is what conftest.py does by hand. Both are present on
+# purpose: pytest run through this config needs no conftest, and `python -m
+# pytest` from a checkout that predates this file still works.
+pythonpath = ["src"]
+addopts = "-q"

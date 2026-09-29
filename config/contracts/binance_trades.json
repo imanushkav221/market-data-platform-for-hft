@@ -1,0 +1,26 @@
+{
+  "dataset": "binance_trades",
+  "schema_version": "1.0",
+  "description": "Raw trade prints for a crypto pair. The high-frequency path: many rows, arrival order not guaranteed, duplicates possible on reconnect.",
+  "grain": ["venue", "symbol", "trade_id"],
+  "event_time_column": "ts",
+  "columns": [
+    {"name": "venue", "type": "string", "required": true, "allowed": ["binance"]},
+    {"name": "symbol", "type": "string", "required": true},
+    {"name": "trade_id", "type": "int", "required": true, "min": 1},
+    {"name": "ts", "type": "timestamp_ms", "required": true},
+    {"name": "price", "type": "float", "required": true, "min": 0, "exclusive_min": true},
+    {"name": "qty", "type": "float", "required": true, "min": 0, "exclusive_min": true},
+    {"name": "is_buyer_maker", "type": "bool", "required": true}
+  ],
+  "rules": {
+    "unique_on": ["venue", "symbol", "trade_id"],
+    "reject_future_events_seconds": 60,
+    "max_null_fraction": 0.0
+  },
+  "lineage": {
+    "source_system": "binance_rest_aggtrades",
+    "owner": "market-data-platform",
+    "licence": "public market data, free tier"
+  }
+}

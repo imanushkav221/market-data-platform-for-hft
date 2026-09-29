@@ -1,0 +1,46 @@
+# Prometheus scrapes the platform. It does not know anything about market data;
+# it knows about numbers over time, which is the point. Everything that decides
+# what "bad" looks like lives in rules/, next to this file and in version
+# control, so a threshold change is a reviewed diff rather than a click.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: mdp
+    env: demo
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # The exporter runs where the pipeline runs, not in this compose file, for the
+  # same reason node_exporter does not live in an application's stack: it has to
+  # keep reporting when the application is the thing that has died.
+  - job_name: mdp
+    static_configs:
+      - targets: ["host.docker.internal:9108"]
+        labels:
+          service: market-data-platform
+
+  # The containerised exporter (the `mdp` service in docker-compose.yml) is a
+  # convenience for a machine with docker and no host Python, not a replacement
+  # for the job above: an exporter inside this stack goes down with it, which is
+  # precisely when you need it. Uncomment to scrape it as well — a separate job
+  # name keeps `up{job=...}` distinct, so MdpExporterDown still means something
+  # for each of them.
+  #
+  # - job_name: mdp-container
+  #   static_configs:
+  #     - targets: ["mdp:9108"]
+  #       labels:
+  #         service: market-data-platform
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

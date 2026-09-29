@@ -1,0 +1,27 @@
+# Dagster instance configuration for this code location.
+#
+# This file lives in the repository and is copied into $DAGSTER_HOME by
+# `make dagster` (Dagster reads `$DAGSTER_HOME/dagster.yaml`, so it cannot be
+# pointed at a file in a source tree without also writing its run storage there).
+#
+# The only thing it configures is the single-writer constraint. `mdp_store_writer`
+# is the pool every asset and asset check in flows/definitions.py that opens the
+# store declares, and DuckDB allows exactly one connection to hold the file - a
+# reader as much as a writer. One slot makes that a property of the deployment
+# instead of a rule everybody has to remember.
+#
+# `granularity: op` is the part that matters: the default, `run`, limits how many
+# *runs* hold the pool, which does nothing about two steps inside one run opening
+# the same DuckDB file at the same moment. That is exactly the collision this
+# repository hit, so the limit is applied per step.
+#
+# This is deployment configuration, not pipeline code, which is why it ports. Any
+# orchestrator has to express "these steps contend for one resource" somehow -
+# Airflow's idiom is a pool with one slot - and none of it reaches the assets.
+#
+# On QuestDB raise the limit and the loads run concurrently; nothing
+# in the asset definitions changes, because the constraint was never in them.
+concurrency:
+  pools:
+    granularity: op
+    default_limit: 1

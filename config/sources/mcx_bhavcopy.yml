@@ -1,0 +1,91 @@
+# Adding a new end-of-day source is this file. No Python change.
+name: mcx_bhavcopy
+dataset: mcx_bhavcopy
+contract: config/contracts/mcx_bhavcopy.json
+frequency: daily
+acquire:
+  driver: mcx_bhavcopy
+  base_url: https://www.mcxindia.com
+  # The published EOD file. Intraday and tick are licensed products and are not fetched here.
+  path_template: "/backpage.aspx/GetDateWiseBhavCopy?date={date:%d/%m/%Y}"
+  symbols: [GOLD, SILVER, CRUDEOIL, NATURALGAS, COPPER]
+  retry: {attempts: 3, backoff_seconds: 5}
+  # Event-driven path: a vendor or exchange file landing here is ingested on
+  # arrival rather than waiting for the next scheduled run.
+  drop_driver: file_drop
+  drop:
+    dir: data/incoming/mcx_bhavcopy
+    pattern: "*.csv"
+    settle_seconds: 1          # wait for the write to finish before reading
+    latency_sla_seconds: 60    # file written -> rows queryable
+    # The exchange file uses its own column names. Mapping is config, not code.
+    column_map:
+      Symbol: symbol
+      ExpiryDate: expiry
+      Date: trade_date
+      Open: open
+      High: high
+      Low: low
+      Close: close
+      SettlePrice: settle
+      Volume: volume
+      OpenInterest: open_interest
+    constants:
+      exchange: MCX
+  # What "on time" means, and which days we expect anything at all. Without the
+  # calendar every weekend looks like a vendor failure.
+  # One file a day, published after the close, so there is nothing to fetch
+  # until the session ends. But publication time varies, and a single shot at a
+  # fixed hour cannot tell "late" from "never". So: start looking when the file
+  # is due, keep looking until it lands or the window closes.
+  schedule:
+    kind: arrival_window
+    opens_at: "23:55"          # the calendar's publication deadline, IST
+    poll_seconds: 900          # look every 15 minutes
+    max_wait_minutes: 120      # then call it missing and page somebody
+    description: "poll from the publication deadline until the file arrives"
+    # A catch-up run for the morning after the watcher was down belongs here, but
+    # nothing reads it yet: the daily schedule lives in flows/definitions.py, and a
+    # second entry point would have to be wired to it before this key meant
+    # anything. Left out rather than left in as a setting somebody would reasonably
+    # assume takes effect.
+  monitor:
+    calendar: mcx
+    date_column: trade_date
+    lookback_days: 7
+landing:
+  format: parquet
+  partition_by: [dataset, date]
+load:
+  table: eod_bars
+  # Inserts are batched at this size by pipeline.run_source. One file a day is a
+  # single batch in practice; the setting is here because the same loader carries
+  # the tick path, where the per-write cost of the server it is talking to — a part
+  # to merge, or a WAL transaction to apply — is paid once per batch rather than
+  # once per row.
+  batch_rows: 50000
+quality:
+  # The names here are the checks in src/mdp/quality.py, nothing more.
+  #
+  # `reconcile_totals` used to be in this list and is gone. It never reconciled
+  # anything: both sides of its comparison were built from the same parsed
+  # frame, so a truncated file agreed with itself to four decimal places and
+  # reported a clean pass. The two checks below replaced it. `volume_accounted`
+  # is what that arithmetic actually measured — how much of the file's own
+  # declared volume the contract gate threw away, per symbol — and
+  # `expected_coverage` is the one that can catch a truncated delivery, by
+  # comparing the file against the trading calendar and against its own shape.
+  checks: [contract, uniqueness, volume_accounted, expected_coverage, freshness]
+  freshness_sla_seconds: 86400
+  expect_rows_min: 5
+  # How much of a symbol's own volume may be quarantined before volume_accounted
+  # warns. Zero, because on an end-of-day file of a few thousand rows any
+  # rejected row is worth looking at.
+  reconcile:
+    tolerance_pct: 0.0
+  # coverage:
+  #   require_configured_symbols: true
+  # Off deliberately. The strongest form of expected_coverage demands every
+  # symbol in `acquire.symbols` in every file, and this source is also fed by a
+  # drop directory that legitimately carries one commodity per file. A
+  # deployment whose delivery really is the whole day turns this on.

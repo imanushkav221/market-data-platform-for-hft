@@ -1,0 +1,187 @@
+services:
+  # ---------------------------------------------------------------------------
+  # QuestDB: the primary production store.
+  #
+  # It is first in this file because it is the default target of the pipeline, and
+  # the reason is a measurement rather than a preference. bench/RESULTS.md times
+  # the as-of join -- "the last trade at or before each of N decision timestamps",
+  # the query this platform exists to make correct -- over 20,000,000 trades.
+  # QuestDB: 0.029 s at 5,000 decisions, 0.081 s at 50,000, +297 MB resident.
+  # ClickHouse: 1.06 s at both sizes, +839 MB. ClickHouse's time is flat in the
+  # number of decisions because it hash-builds the entire right-hand side into
+  # memory and as-of semantics fix which side that is, so the 20M-row trades table
+  # goes in every time. QuestDB binary-searches a physically time-ordered column
+  # store. At this size ClickHouse is slower but fine; the finding is that one of
+  # those two costs grows with the table rather than with the question.
+  #
+  # The pin is 8.2.1, which is the version the benchmark ran on and the version
+  # every behaviour asserted in src/mdp/storage.py and tests/test_questdb.py was
+  # verified against on a live server. QuestDB has newer releases, and one thing
+  # in them is directly relevant -- 8.3 adds `TOLERANCE` to ASOF JOIN, which
+  # bounds how far back the join looks. Moving the pin is therefore not a
+  # no-brainer upgrade: it changes the numbers this choice rests on, so it goes
+  # with a re-run of bench/run.sh in the same change. Pinning ahead of the
+  # evidence would make the benchmark decorative.
+  #
+  # What is not here, and is a real cost rather than an omission: the open-source
+  # build has no replication, no TLS and no role-based access control. All three
+  # are Enterprise. For a platform serving licensed exchange data that matters,
+  # it is in none of the numbers above, and it is the argument that would bring
+  # ClickHouse back as the primary store -- its open-source build has all three.
+  # See docs/ARCHITECTURE.md section 3.2.
+  questdb:
+    image: questdb/questdb:8.2.1
+    container_name: mdp-questdb
+    ports:
+      - "9000:9000"   # HTTP: /exec, /imp, and the web console. What the store uses.
+      - "8812:8812"   # PostgreSQL wire protocol, for psql and BI tools
+      - "9009:9009"   # InfluxDB line protocol, for a future streaming writer
+    environment:
+      # Room for the WAL apply job to batch, which is what keeps a tick-rate
+      # ingest from committing a partition per handful of rows.
+      QDB_CAIRO_MAX_UNCOMMITTED_ROWS: "500000"
+      QDB_CAIRO_O3_MAX_LAG: "600000"
+      # The minimal HTTP server on 9003, which exists for health checks and
+      # serves nothing else. Enabled so the check below has something cheap to
+      # ask that does not run a query.
+      QDB_HTTP_MIN_ENABLED: "true"
+    volumes:
+      - qdb_data:/var/lib/questdb
+    healthcheck:
+      # /dev/tcp rather than curl or wget: the QuestDB image is a JRE base with
+      # neither installed, so the usual `wget --spider localhost:PORT/ping` check
+      # would report the container permanently unhealthy. This only proves the
+      # port is listening, which is what a readiness check needs to know.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9003 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Monitoring. Started separately with `make monitoring`, because it has to be
+  # able to outlive the thing it watches.
+  #
+  # Note what is *not* here: the exporter. It runs alongside the pipeline, on the
+  # host, for the same reason node_exporter is not in an application's stack. If
+  # the exporter shared a lifecycle with Prometheus, then "the platform is down"
+  # and "the monitoring is down" would be the same event, and the one alert you
+  # need most would be the one you cannot receive.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    # Prometheus 3.x. v2.54.1 was a whole major version behind. v3.13 is the
+    # current LTS, supported to July 2027; the newest 3.x at the time of writing
+    # (3.15) is a six-week release, which is not what a demo stack should pin.
+    image: prom/prometheus:v3.13.3
+    container_name: mdp-prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle          # reload rules without losing history
+    volumes:
+      # The whole directory, not two separate mounts, so the layout inside the
+      # container is the layout in the repo. That is what makes `promtool check
+      # config` and `promtool test rules` in the Makefile and in CI resolve the
+      # same relative paths Prometheus resolves at startup.
+      - ./monitoring:/etc/prometheus:ro
+      - prom_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux needs this spelled out
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  alertmanager:
+    # v0.27.0 is end of life. v0.34.0 is current.
+    image: prom/alertmanager:v0.34.0
+    container_name: mdp-alertmanager
+    profiles: ["monitoring"]
+    ports:
+      - "9093:9093"
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - am_data:/alertmanager
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    # 11.2.0 is end of life. 13.2.2 is the current stable. Grafana migrates the
+    # provisioned dashboard's schemaVersion on load, so nothing in
+    # monitoring/grafana needs to change with it.
+    image: grafana/grafana:13.2.2
+    container_name: mdp-grafana
+    profiles: ["monitoring"]
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous viewer access: this is a demo stack on a laptop, and a login
+      # wall between somebody and a dashboard is how dashboards stop being read.
+      # A real deployment puts SSO in front and deletes these four lines.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/mdp-platform.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # ---------------------------------------------------------------------------
+  # The platform's own exporter, containerised.
+  #
+  # Read the note above this block first, because this service does not replace
+  # it. The documented default is still `make exporter` on the host: an exporter
+  # that shares a lifecycle with the monitoring stack cannot tell you the
+  # monitoring stack has died, and Prometheus still scrapes
+  # host.docker.internal:9108 out of the box.
+  #
+  # This is here for the case where there is no host Python — a reviewer with
+  # docker and nothing else, or a CI box — so that `docker compose --profile
+  # monitoring up -d` brings up something to scrape rather than a dashboard of
+  # gaps. It is a convenience, and the trade-off it makes is named so nobody
+  # promotes it to the default by accident.
+  #
+  # To use it, uncomment the mdp-container job in monitoring/prometheus.yml.
+  # Both targets can run at once: they are separate jobs with separate `up`
+  # series, so MdpExporterDown stays meaningful for each.
+  # ---------------------------------------------------------------------------
+  mdp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mdp:local
+    container_name: mdp-exporter
+    profiles: ["monitoring"]
+    command: ["python", "-m", "mdp.cli", "exporter", "--port", "9108"]
+    ports:
+      - "9108:9108"
+    environment:
+      # Reads the same QuestDB the pipeline writes, because that is the primary
+      # production store and an exporter pointed somewhere else would be measuring
+      # a database nobody is serving from. Swap MDP_STORE to duckdb with a bind
+      # mount on /app/data if you want the no-server version.
+      MDP_STORE: questdb
+      QDB_HOST: questdb
+      QDB_PORT: "9000"
+    depends_on:
+      questdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  qdb_data:
+  prom_data:
+  am_data:
+  grafana_data:

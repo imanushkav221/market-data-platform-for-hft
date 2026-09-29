@@ -1,0 +1,48 @@
+# Fast checks that run before a commit exists, so CI is confirming rather than
+# discovering. Install once with `make hooks`.
+#
+# Deliberately not a copy of the CI job. pre-commit only sees the files being
+# committed, which is the right scope for a repo with a lint backlog: new and
+# touched code has to be clean, and the rest gets fixed as it is worked on
+# rather than in one unreviewable sweep. The whole-repo gate stays in CI, where
+# a slow honest answer is fine.
+#
+# Nothing here needs the project's own dependencies, so a hook never has to
+# resolve pandas or Dagster to tell you about a trailing space.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.ipynb$
+      - id: end-of-file-fixer
+        exclude: \.ipynb$
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # The landing zone is gitignored, but a parquet file committed by
+        # accident is very hard to get back out of history.
+        args: [--maxkb=512]
+      - id: check-yaml
+        # Compose and the Grafana provisioning files are plain YAML. The
+        # alert rules are checked properly by promtool in CI, which understands
+        # what the documents mean and not just that they parse.
+        files: ^(docker-compose\.yml|monitoring/.*\.yml|\.github/workflows/.*\.yml)$
+      - id: check-toml
+      - id: check-json
+        files: ^(config/contracts/.*\.json|monitoring/grafana/dashboards/.*\.json)$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff-check
+        # No --fix. An autofix that rewrites a file underneath someone mid-edit
+        # is a surprise, and the settings live in pyproject.toml either way.
+        args: []
+
+  # uv.lock and pyproject.toml drifting apart is the single most common way a
+  # green local checkout produces a red CI run.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.19
+    hooks:
+      - id: uv-lock

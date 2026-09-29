@@ -1,0 +1,252 @@
+name: tests
+
+# Runs on every push and pull request. The point is not the badge: it is that
+# nobody has to remember to run the tests before changing a contract.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch. A force-push while CI is still chewing on the previous
+# commit should cancel it, not queue behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned to the version that generated uv.lock, so CI resolves the way a
+  # developer's machine does.
+  UV_VERSION: "0.12.19"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Static checks. One job, one Python: a lint finding does not differ between
+  # 3.12 and 3.13, and running it twice only doubles the noise on a red build.
+  # ---------------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: The lockfile matches pyproject.toml
+        # Catches the commit that edits dependencies and forgets to re-lock,
+        # which otherwise shows up as a mysterious failure three jobs later.
+        run: uv lock --check
+
+      - name: Install
+        run: uv sync --frozen
+
+      # Both static checks below are blocking. They were introduced against
+      # code written before either of them ran, so there was a backlog: 171 ruff
+      # findings and 5 mypy errors. It was paid down in the same pass rather
+      # than parked behind continue-on-error, because a gate that is red on the
+      # day it is added does not get fixed, it gets ignored and then removed.
+      #
+      # The mypy config is deliberately not strict: ignore_missing_imports is on
+      # and disallow_untyped_defs is off. The point is to catch the Optional
+      # that gets dereferenced without a check, which is what all but one of
+      # those five were, not to win an argument about annotation coverage.
+
+      - name: ruff
+        run: uv run ruff check . --output-format=github
+
+      - name: mypy
+        run: uv run mypy
+
+  # ---------------------------------------------------------------------------
+  # The test suite and the two things a README promises: the demo and the
+  # notebook.
+  #
+  # 3.12 and 3.13, because those are the two Python versions still getting more
+  # than security fixes. 3.11 was dropped: keeping a security-only interpreter in
+  # the matrix costs a full job on every push and proves nothing a supported one
+  # would not.
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        # --frozen installs exactly what uv.lock says and never re-resolves, so
+        # a green CI run means the dependency set a developer has is the one
+        # that was tested.
+        run: uv sync --frozen
+
+      - name: Tests
+        run: uv run pytest
+
+      - name: The demo has to keep working
+        # A README that does not run is worse than no README.
+        run: |
+          uv run python -m mdp.cli init
+          uv run python -m mdp.cli ingest --synthetic --strict
+          uv run python -m mdp.cli reference
+          uv run python -m mdp.cli model --symbol CRUDEOIL
+
+      - name: The notebook has to keep executing
+        # The research surface is a deliverable, so a change that breaks it
+        # should fail here rather than in front of somebody.
+        run: |
+          uv run jupyter nbconvert --to html --execute \
+            --ExecutePreprocessor.timeout=600 \
+            --output-dir docs --output research notebooks/research.ipynb
+
+  # ---------------------------------------------------------------------------
+  # Alert rules and routing.
+  #
+  # Its own job now. This used to run inside the Python matrix, where it pulled
+  # two container images and validated the same two files once per interpreter
+  # version, neither of which has anything to do with Python.
+  # ---------------------------------------------------------------------------
+  monitoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Alert rules and routing have to parse
+        # A rule with a typo in it is a rule that never fires, and nothing tells
+        # you. promtool and amtool are the only things that will.
+        run: |
+          # Mounted at /etc/prometheus so the rule_files glob in prometheus.yml
+          # resolves exactly as it will at runtime.
+          docker run --rm -v "$PWD/monitoring:/etc/prometheus" \
+            --entrypoint promtool prom/prometheus:v3.13.3 \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm -v "$PWD/monitoring:/etc/alertmanager" \
+            --entrypoint amtool prom/alertmanager:v0.34.0 \
+            check-config /etc/alertmanager/alertmanager.yml
+
+      - name: Alert rules have to fire on the thing they describe
+        # Parsing is not behaviour. Both bugs fixed in mdp.yml — a calendar gate
+        # that made a Friday outage unpageable until Monday, and a min() that let
+        # one arriving symbol hide a partial file — were valid PromQL. These are
+        # unit tests over synthetic series; they are the only thing that would
+        # have caught either.
+        run: |
+          docker run --rm -v "$PWD/monitoring:/monitoring" -w /monitoring/tests \
+            --entrypoint promtool prom/prometheus:v3.13.3 \
+            test rules mdp_test.yml
+
+  # ---------------------------------------------------------------------------
+  # The primary store.
+  #
+  # This job exists because of a mistake this repository already made once. The
+  # ClickHouse schema this repo used to carry was the production target for months
+  # and had never been applied to a server; when it finally was, it failed on its
+  # third statement, because `toYYYY` is not a ClickHouse function. A claim nobody
+  # runs is not a claim. That schema and its backend are gone now — ClickHouse was
+  # measured, rejected, and written up in docs/ARCHITECTURE.md — but the lesson it
+  # taught is the reason this job is shaped the way it is.
+  #
+  # QuestDB is the primary store — see bench/RESULTS.md for the measurement that
+  # decided it — so this job blocks. It applies sql/02_questdb.sql to the pinned
+  # server and drives both the CLI and the tests through QuestDBStore, so the
+  # claims the repo makes about the store it actually uses are claims something
+  # ran. There is no continue-on-error anywhere in this file, and a store the
+  # platform depends on is exactly the thing that must not get one.
+  #
+  # Known gap worth naming: the `store` fixture in tests/test_platform.py
+  # constructs DuckDBStore directly, so MDP_STORE has no effect on most of pytest.
+  # tests/test_questdb.py and the CLI steps below are the part that genuinely
+  # exercises QuestDB; making that fixture honour MDP_STORE is the change that
+  # would make the rest of the pytest step mean something here.
+  # ---------------------------------------------------------------------------
+  questdb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      questdb:
+        image: questdb/questdb:8.2.1
+        ports:
+          - 9000:9000
+          - 9009:9009
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/status || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      MDP_STORE: questdb
+      QDB_HOST: localhost
+      QDB_PORT: "9000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Apply the schema
+        # Statement by statement over HTTP, because QuestDB has no batch client
+        # and `/exec` takes one statement at a time. Comments and blank lines are
+        # stripped; anything the server rejects fails the step, which is the
+        # whole point.
+        run: |
+          uv run python - <<'EOF'
+          import pathlib, sys, requests
+          sql = pathlib.Path("sql/02_questdb.sql").read_text()
+          lines = [ln for ln in sql.splitlines() if not ln.strip().startswith("--")]
+          for statement in " ".join(lines).split(";"):
+              statement = statement.strip()
+              if not statement:
+                  continue
+              r = requests.get("http://localhost:9000/exec",
+                               params={"query": statement}, timeout=60)
+              body = r.json()
+              if "error" in body:
+                  print(f"FAILED: {statement[:120]}\n  {body['error']}", file=sys.stderr)
+                  sys.exit(1)
+          print("schema applied")
+          EOF
+
+      - name: The schema is what the file said it was
+        run: |
+          curl -sS --get --fail-with-body "http://localhost:9000/exec" \
+            --data-urlencode "query=SELECT table_name, designatedTimestamp, partitionBy,
+                                     walEnabled, dedup FROM tables() ORDER BY table_name"
+
+      - name: The CLI runs against QuestDB
+        run: |
+          uv run python -m mdp.cli init
+          uv run python -m mdp.cli ingest --synthetic
+          uv run python -m mdp.cli reference
+          uv run python -m mdp.cli status
+
+      - name: Tests, against QuestDB
+        # tests/test_questdb.py skips itself when no server is reachable, so on
+        # every other job it is silent. Here it must actually run: a skipped test
+        # that nobody notices is how the ClickHouse gap survived for months.
+        run: |
+          uv run pytest tests/test_questdb.py -v
+          uv run pytest
+

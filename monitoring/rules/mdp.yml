@@ -1,0 +1,183 @@
+# What is worth waking someone for.
+#
+# Two rules of thumb are doing most of the work here.
+#
+# First, every staleness alert is gated on the exchange calendar. Wall-clock
+# freshness is wrong for end-of-day data: the file is not late on Sunday, it is
+# not due. An alert that fires every weekend gets silenced, and a silenced alert
+# is worse than no alert because it looks like coverage.
+#
+# Second, severity maps to the decision the person has to make. `page` means the
+# data is wrong or absent and somebody must act before the desk uses it. `warn`
+# means the data is usable but something is drifting and should be looked at in
+# the morning. Nothing pages on a single bad sample.
+
+groups:
+  - name: mdp-delivery
+    rules:
+      - alert: MdpEodFileLate
+        # Past its own deadline, with the newest bar we hold still from before
+        # the trading day that deadline belongs to.
+        #
+        # Two bugs lived in the previous version of this expression, and both
+        # are the kind that only show up when the alert is needed.
+        #
+        # 1. It was gated on `mdp_trading_day == 1`, which answers "is the
+        #    exchange open *right now*". A Friday file that never arrives cannot
+        #    page on Saturday or Sunday, because the gate is 0 both days; the
+        #    first moment it could fire was Monday night, by which point the desk
+        #    had traded a whole session on stale data. The gate was protecting
+        #    against firing every weekend, which is a real concern, but it was
+        #    protecting against it with the wrong clock.
+        #
+        # 2. It used `min(mdp_data_age_seconds{dataset="eod_bars"})` — the
+        #    *freshest* symbol. One symbol arriving out of a file of two hundred
+        #    was enough to hold the alert down. A partial delivery is exactly the
+        #    failure this rule exists to catch, so it has to be `max()`: the
+        #    staleness of the worst symbol, not the best.
+        #
+        # The fix for (1) removes the calendar gate rather than repairing it, by
+        # measuring lateness against the deadline instead of against now:
+        #
+        #     mdp_data_age_seconds        = now - newest_bar
+        #     mdp_delivery_deadline_secs  = deadline - now
+        #     sum of the two              = deadline - newest_bar
+        #
+        # `now` cancels. What is left is "how far behind its own deadline the
+        # newest bar is", which does not move on a weekend, a holiday or at any
+        # particular hour, and needs no calendar gate to stay quiet. The deadline
+        # metric is already calendar-aware: its trading_day label is the most
+        # recent *trading* day, so on Saturday it still refers to Friday.
+        #
+        # The 86400 threshold reads as "a whole trading day behind". It is robust
+        # for any deadline time of day: if the file for trading day D is present,
+        # the newest bar is D and the gap is the deadline's time of day (23:55
+        # IST here, so ~66000s, and by construction always under 86400). If D's
+        # file is missing, the newest bar is D-1 or earlier and the gap is that
+        # plus at least a further 86400.
+        #
+        # The second clause is unchanged in meaning: do not fire before the file
+        # is actually overdue. -1800 is the calendar's 30 minute grace period.
+        expr: |
+          (
+            max(mdp_data_age_seconds{dataset="eod_bars"})
+              + on() group_right() mdp_delivery_deadline_seconds{calendar="mcx"}
+          ) > 86400
+          and on(calendar) mdp_delivery_deadline_seconds{calendar="mcx"} < -1800
+        for: 10m
+        labels:
+          severity: page
+          team: data-platform
+        annotations:
+          summary: "MCX end-of-day file for {{ $labels.trading_day }} has not arrived"
+          description: >-
+            The newest end-of-day bar held is {{ $value | humanizeDuration }}
+            behind the delivery deadline for {{ $labels.trading_day }}, which has
+            itself already passed. Nothing downstream should publish until this
+            lands or is explicitly waived.
+          runbook: "docs/ARCHITECTURE.md#when-a-file-does-not-arrive"
+
+      - alert: MdpTickFeedStalled
+        # The cursor is the only honest liveness signal for a streaming source:
+        # the poller can be running happily and taking in nothing.
+        #
+        # Deliberately the IDLE metric, not the position age. Position age is
+        # how far behind the data is, which climbs on its own through a quiet
+        # market and would page for a market doing nothing wrong. Idle time is
+        # how long since the cursor moved, which only climbs when the pipeline
+        # has stopped. The rule used to read the first under the name of the
+        # second.
+        expr: mdp_cursor_idle_seconds > 600
+        for: 10m
+        labels:
+          severity: page
+          team: data-platform
+        annotations:
+          summary: "{{ $labels.source }} cursor has not advanced"
+          description: >-
+            {{ $labels.source }} is {{ $value | humanizeDuration }} behind. The
+            poller is either dead or being served nothing.
+
+  - name: mdp-quality
+    rules:
+      - alert: MdpChecksFailing
+        # A failing contract check means a load was blocked, so the absence of
+        # new data is intentional. Somebody still has to know why.
+        expr: increase(mdp_checks_total{status="fail"}[15m]) > 0
+        labels:
+          severity: page
+          team: data-platform
+        annotations:
+          summary: "{{ $labels.source }}: {{ $labels.check }} failed"
+          description: >-
+            A contract check failed and the load was blocked. The rejected rows
+            are in the quarantine directory with a reason column.
+
+      - alert: MdpWarnRateRising
+        expr: |
+          increase(mdp_checks_total{status="warn"}[1h]) > 5
+        for: 30m
+        labels:
+          severity: warn
+          team: data-platform
+        annotations:
+          summary: "{{ $labels.source }}: warnings accumulating"
+          description: >-
+            {{ $labels.check }} has warned repeatedly. Individually tolerable,
+            collectively a vendor that is drifting.
+
+  - name: mdp-sources
+    rules:
+      - alert: MdpVendorDegraded
+        expr: mdp_vendor_score < 0.8
+        for: 1h
+        labels:
+          severity: warn
+          team: data-platform
+        annotations:
+          summary: "{{ $labels.source }} quality score {{ $value | printf \"%.2f\" }}"
+          description: >-
+            Weighted freshness, completeness and accuracy have been below 0.8 for
+            an hour. This is a conversation with the vendor, not an incident.
+
+      - alert: MdpVendorFailing
+        expr: mdp_vendor_score < 0.6
+        for: 15m
+        labels:
+          severity: page
+          team: data-platform
+        annotations:
+          summary: "{{ $labels.source }} quality score {{ $value | printf \"%.2f\" }}"
+          description: >-
+            Below the level at which the feed should be trusted. Consider failing
+            over to the secondary source for affected symbols.
+
+  - name: mdp-meta
+    rules:
+      # Monitoring that cannot tell you it has stopped working is decoration.
+      - alert: MdpExporterDown
+        expr: up{job="mdp"} == 0
+        for: 5m
+        labels:
+          severity: page
+          team: data-platform
+        annotations:
+          summary: "Metrics endpoint unreachable"
+          description: >-
+            Prometheus cannot scrape the platform. Every other alert in this file
+            is blind until this is fixed.
+
+      - alert: MdpExporterCannotReadStore
+        # A distinct failure from the one above, and they get confused often
+        # enough to be worth separating: the endpoint answers, but the numbers
+        # behind it are frozen.
+        expr: time() - mdp_exporter_last_success_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warn
+          team: data-platform
+        annotations:
+          summary: "Metrics are being served but not refreshed"
+          description: >-
+            The exporter is up and serving its last good payload, but has not
+            read the store in over five minutes. Usually a held write lock.
